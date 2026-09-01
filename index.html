@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>SF Maturity Suite — Roadmap & Assessment</title>
+  <title>SF Maturity Suite — Roadmap & Assessment v4.0</title>
   <meta name="description" content="Single-file React app with shadcn-style UI components and responsive full-width layout. No build step required." />
 
   <!-- Tailwind CDN with shadcn tokens -->
@@ -2224,10 +2224,17 @@ const listToString = arr => arr.join(", ");
 const parseList = s => s.split(",").map(t => t.trim()).filter(Boolean);
 const parseListMultiline = s => s.split(/\n|,/).map(t => t.trim()).filter(Boolean);
 function buildExcelHtml(rows) {
-  const esc = s => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  // Roadmap rows imported from older files or custom definitions can omit optional
+  // fields. Convert every value to a safe string before applying HTML escaping.
+  const esc = value => String(value == null ? "" : value).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
   const ths = ["Transition Objective", "Interventions", "Responsible Roles", "Practices", "Practice Areas", "Metrics"].map(h => `<th style="text-align:left">${esc(h)}</th>`).join("");
-  const trs = rows.map(r => {
-    const td = v => `<td>${Array.isArray(v) ? esc(v.join("; ")) : esc(v)}</td>`;
+  const safeRows = Array.isArray(rows) ? rows : [];
+  const trs = safeRows.map(row => {
+    const r = row && typeof row === "object" ? row : {};
+    const td = value => {
+      const normalized = Array.isArray(value) ? value.map(item => item == null ? "" : item).join("; ") : value;
+      return `<td>${esc(normalized)}</td>`;
+    };
     return `<tr>${td(r.objective)}${td(r.interventions)}${td(r.roles)}${td(r.practices)}${td(r.practiceAreas)}${td(r.metrics)}</tr>`;
   }).join("");
   return `<!doctype html><html><head><meta charset=\"utf-8\"/></head><body><table><thead><tr>${ths}</tr></thead><tbody>${trs}</tbody></table></body></html>`;
@@ -2244,6 +2251,50 @@ function downloadBlob(filename, mime, content) {
   a.click();
   a.remove();
   URL.revokeObjectURL(url);
+}
+
+// Editable Microsoft Word export. Word-compatible HTML preserves the report design
+// while keeping this single-file application dependency-free.
+function exportToWord(assessmentData, roadmapData, filters, definitionArg, definitionIdArg) {
+  try {
+    const esc = value => String(value == null ? '' : value).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+    const items = value => (Array.isArray(value) ? value : value ? [value] : []).map(v => `<li>${esc(v)}</li>`).join('');
+    const now = new Date();
+    const dateStr = now.toISOString().split('T')[0];
+    const timeStr = now.toLocaleTimeString();
+    let state = {};
+    try { state = (typeof loadDmaStateV2 === 'function' ? loadDmaStateV2() : null) || {}; } catch {}
+    const defId = definitionIdArg || state.activeDefinitionId || 'default';
+    const def = definitionArg || state.definitionsById && state.definitionsById[defId] || (typeof DEFAULT_DEFINITION !== 'undefined' ? DEFAULT_DEFINITION : null);
+    const companyId = filters && (filters.companyId || filters.currentCompanyId) || null;
+    const bucket = state.assessmentsByDefinitionId && state.assessmentsByDefinitionId[defId];
+    const company = Array.isArray(bucket) && companyId ? bucket.find(c => c && c.id === companyId) : null;
+    let responses = company && company.resp && typeof company.resp === 'object' ? company.resp : {};
+    if (!Object.keys(responses).length) try { responses = JSON.parse(localStorage.getItem(getCaseStorageKey('assessment_all_v1', defId, 'assessment_all_v1')) || '{}'); } catch {}
+    const dimensions = def && Array.isArray(def.dimensions) ? def.dimensions : [];
+    const maturityRows = [], detailRows = [];
+    dimensions.forEach(dim => {
+      const criteria = Array.isArray(dim.criteria) ? dim.criteria : [];
+      const values = criteria.map(c => Number(responses && responses[dim.id] && responses[dim.id][c.id] && responses[dim.id][c.id].value)).filter(v => Number.isFinite(v) && v > 0);
+      const score = values.length ? Math.min(...values) : null;
+      maturityRows.push(`<tr><td>${esc(dim.label || dim.name || dim.id)}</td><td>${score ? `Level ${score}` : 'N/A'}</td></tr>`);
+      criteria.forEach(c => {
+        const value = Number(responses && responses[dim.id] && responses[dim.id][c.id] && responses[dim.id][c.id].value);
+        detailRows.push(`<tr><td>${esc(dim.label || dim.name || dim.id)}</td><td>${esc(c.label || c.name || c.id)}</td><td>${Number.isFinite(value) && value > 0 ? value : 'N/A'}</td><td>${score ? `Level ${score}` : 'N/A'}</td></tr>`);
+      });
+    });
+    const systems = company && (company.systems || company.informationSystems) || assessmentData && (assessmentData.systems || assessmentData.informationSystems) || [];
+    const systemRows = Array.isArray(systems) && systems.length ? systems.map(x => `<tr><td>${esc(x && (x.name || x.system || ''))}</td><td>${esc(x && (x.purpose || x.description || ''))}</td><td>${esc(x && (x.integrations || x.integration || ''))}</td></tr>`).join('') : '<tr><td colspan="3">No information systems were documented.</td></tr>';
+    const roadmapRows = (Array.isArray(roadmapData) ? roadmapData : []).map(r => `<tr class="group"><td colspan="6"><strong>${esc(r.objective || '')}</strong><br><span>${esc((r.subDimension || r.dimension || '') + (r.transition ? ' • ' + r.transition : ''))}</span></td></tr><tr><td></td><td><ul>${items(r.interventions)}</ul></td><td><ul>${items(r.roles)}</ul></td><td><ul>${items(r.practices)}</ul></td><td><ul>${items(r.practiceAreas)}</ul></td><td><ul>${items(r.metrics)}</ul></td></tr>`).join('');
+    const org = assessmentData && assessmentData.org || 'Not specified';
+    const baseName = assessmentData && assessmentData.org ? `${assessmentData.org} Maturity Assessment Report` : 'Maturity Assessment Report';
+    const html = `<!doctype html><html xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:w="urn:schemas-microsoft-com:office:word"><head><meta charset="utf-8"><title>${esc(baseName)}</title><style>@page{size:A4 portrait;margin:18mm}body{font-family:Arial,sans-serif;color:#111;font-size:10pt;line-height:1.35}h1{font-size:22pt;color:#0e7490}h2{font-size:15pt;color:#0e7490;border-bottom:1px solid #cbd5e1;padding-bottom:5pt;margin-top:20pt}.cover{page-break-after:always}.page{page-break-before:always}.brand{font-weight:bold;color:#0e7490}table{border-collapse:collapse;width:100%;margin:8pt 0 16pt;table-layout:fixed}th{background:#0e7490;color:#fff;text-align:left}th,td{border:1px solid #d1d5db;padding:6pt;vertical-align:top;word-wrap:break-word}.group td{background:#f0f5f8}ul{margin:0;padding-left:14pt}.group span{color:#475569;font-size:9pt}</style></head><body><section class="cover"><div class="brand">WUR INF Group/WALABI</div><h1>${esc(baseName)}</h1><h2>Organization Information</h2><p><strong>Organization:</strong> ${esc(org)}</p><p><strong>Assessor:</strong> ${esc(assessmentData && assessmentData.assessor || 'Not specified')}</p><p><strong>Assessor Role:</strong> ${esc(assessmentData && assessmentData.role || 'Not specified')}</p><p><strong>Assessment Date:</strong> ${esc(dateStr)} ${esc(timeStr)}</p></section><section><h2>Overview of information systems</h2><p>Below are all the identified information systems.</p><table><thead><tr><th>Information system</th><th>Purpose</th><th>Integrations</th></tr></thead><tbody>${systemRows}</tbody></table></section><section class="page"><h2>Maturity Assessment Results</h2><p>This assessment covers ${maturityRows.length} out of ${dimensions.length} key dimensions of digital maturity.</p><h3>Maturity Levels by Dimension</h3><table><thead><tr><th>Dimension</th><th>Maturity level</th></tr></thead><tbody>${maturityRows.join('') || '<tr><td colspan="2">No maturity assessment results available.</td></tr>'}</tbody></table><h3>Sub-dimension maturity</h3><table><thead><tr><th>Dimension</th><th>Sub-dimension</th><th>Sub-dimension score</th><th>Dimension score</th></tr></thead><tbody>${detailRows.join('') || '<tr><td colspan="4">No sub-dimension data available. Please complete the maturity assessment first.</td></tr>'}</tbody></table></section><section class="page"><h2>Digital Integration Roadmap</h2><table><thead><tr><th>Objective</th><th>Interventions</th><th>Roles</th><th>Practices</th><th>Practice Areas</th><th>Metrics</th></tr></thead><tbody>${roadmapRows || '<tr><td colspan="6">No roadmap items matched the selected filters.</td></tr>'}</tbody></table></section></body></html>`;
+    downloadBlob(`${baseName} ${dateStr}.doc`, 'application/msword;charset=utf-8', '\ufeff' + html);
+    notify('Editable Word report generated successfully!');
+  } catch (err) {
+    console.error('Word export failed', err);
+    notify('Unable to generate the Word report. Please try again.');
+  }
 }
 
 // PDF export functionality
@@ -7163,6 +7214,28 @@ function App() {
         className: "h-4 w-4"
       })), /*#__PURE__*/React.createElement("button", {
         onClick: () => {
+          try {
+            const meta = comp.meta || comp.resp && comp.resp._meta || {};
+            exportToWord({
+              org: meta.org || '',
+              assessor: meta.assessor || '',
+              role: meta.role || ''
+            }, [], {
+              companyId: comp.id
+            }, activeDefinition, activeDefinitionId);
+          } catch (err) {
+            console.error(err);
+            notify('Unable to generate the Word report. Please try again.');
+          }
+        },
+        className: "inline-flex items-center justify-center rounded-md p-2 hover:bg-accent ml-1",
+        title: t('Download Word report'),
+        "aria-label": t('Download Word report')
+      }, /*#__PURE__*/React.createElement(Icon, {
+        name: "download",
+        className: "h-4 w-4"
+      })), /*#__PURE__*/React.createElement("button", {
+        onClick: () => {
           // Ask for confirmation before deleting.  If the
           // user cancels the deletion simply return.
           const ok = window.confirm(t('Are you sure you want to delete this company?'));
@@ -7627,11 +7700,12 @@ function App() {
     value: filters.dimension || "",
     onValueChange: v => setFilters(f => {
       const nextDimension = v || "";
-      const nextSubDimension = (SUB_DIMENSIONS[nextDimension] || [])[0] || "";
       return {
         ...f,
         dimension: nextDimension,
-        subDimension: nextSubDimension,
+        // Preserve dimension-overview behaviour: do not silently narrow the
+        // results to the first sub-dimension when the dimension changes.
+        subDimension: "",
         level: "",
         transition: ""
       };
@@ -7688,6 +7762,23 @@ function App() {
     name: "download",
     className: "h-4 w-4 text-gray-700"
   }), " PDF"), /*#__PURE__*/React.createElement(Button, {
+    variant: "outline",
+    onClick: () => {
+      if (!showResults || loading) {
+        notify("No results to export. Please select roadmap filters first.");
+        return;
+      }
+      const assessmentData = getAssessmentData();
+      exportToWord(assessmentData, filteredRows, {
+        ...(filters || {}),
+        companyId: typeof companyEditingId !== 'undefined' ? companyEditingId : null
+      }, activeDefinition, activeDefinitionId);
+    },
+    className: "inline-flex items-center gap-2 bg-white border-gray-300 hover:bg-gray-50"
+  }, /*#__PURE__*/React.createElement(Icon, {
+    name: "download",
+    className: "h-4 w-4 text-gray-700"
+  }), " Word"), /*#__PURE__*/React.createElement(Button, {
     variant: "outline",
     onClick: onExport
   }, /*#__PURE__*/React.createElement(Icon, {
